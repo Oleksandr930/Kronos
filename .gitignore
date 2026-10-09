@@ -74,3 +74,9 @@ venv.bak/
 temp/
 tmp/
 .python-version
+
+# Local training data / artifacts
+btc_kronos_ml_dataset.csv
+catboost_info/
+finetune_csv/data/*.csv
+finetune_csv/finetuned/

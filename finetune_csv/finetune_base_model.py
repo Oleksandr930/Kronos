@@ -22,10 +22,21 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 from config_loader import CustomFinetuneConfig
 
 
+
 class CustomKlineDataset(Dataset):
-    
-    def __init__(self, data_path, data_type='train', lookback_window=90, predict_window=10, 
-                 clip=5.0, seed=100, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+
+    def __init__(
+        self,
+        data_path,
+        data_type='train',
+        lookback_window=90,
+        predict_window=10,
+        clip=5.0,
+        seed=100,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15
+    ):
         self.data_path = data_path
         self.data_type = data_type
         self.lookback_window = lookback_window
@@ -36,102 +47,285 @@ class CustomKlineDataset(Dataset):
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
-        
-        self.feature_list = ['open', 'high', 'low', 'close', 'volume', 'amount']
-        self.time_feature_list = ['minute', 'hour', 'weekday', 'day', 'month']
-        
+
+        self.feature_list = [
+            'open',
+            'high',
+            'low',
+            'close',
+            'volume',
+            'amount'
+        ]
+
+        self.time_feature_list = [
+            'minute',
+            'hour',
+            'weekday',
+            'day',
+            'month'
+        ]
+
         self.py_rng = random.Random(seed)
-        
+
         self._load_and_preprocess_data()
         self._split_data_by_time()
-        
-        self.n_samples = len(self.data) - self.window + 1
-            
-        print(f"[{data_type.upper()}] Data length: {len(self.data)}, Available samples: {self.n_samples}")
-    
+        self._build_sample_index()
+
     def _load_and_preprocess_data(self):
+
         df = pd.read_csv(self.data_path)
-        
-        df['timestamps'] = pd.to_datetime(df['timestamps'])
-        df = df.sort_values('timestamps').reset_index(drop=True)
-        
-        self.timestamps = df['timestamps'].copy()
-        
+
+        df['timestamps'] = pd.to_datetime(
+            df['timestamps'],
+            utc=True
+        )
+
+        if 'symbol' not in df.columns:
+            df['symbol'] = 'SINGLE_ASSET'
+
+        df = (
+            df
+            .sort_values(['symbol', 'timestamps'])
+            .reset_index(drop=True)
+        )
+
         df['minute'] = df['timestamps'].dt.minute
         df['hour'] = df['timestamps'].dt.hour
         df['weekday'] = df['timestamps'].dt.weekday
         df['day'] = df['timestamps'].dt.day
         df['month'] = df['timestamps'].dt.month
-        
-        self.data = df[self.feature_list + self.time_feature_list].copy()
-        
-        if self.data.isnull().any().any():
-            print("Warning: Missing values found in data, performing forward fill")
-            self.data = self.data.fillna(method='ffill')
-        
-        print(f"Original data time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        print(f"Original data total length: {len(df)} records")
-    
+
+        if df[self.feature_list].isnull().any().any():
+
+            df[self.feature_list] = (
+                df
+                .groupby('symbol')[self.feature_list]
+                .ffill()
+            )
+
+        self.raw_df = df.copy()
+
+        print(
+            "Original symbols:",
+            self.raw_df['symbol'].nunique()
+        )
+
+        print(
+            self.raw_df['symbol'].value_counts()
+        )
+
     def _split_data_by_time(self):
-        total_length = len(self.data)
-        
-        train_end = int(total_length * self.train_ratio)
-        val_end = int(total_length * (self.train_ratio + self.val_ratio))
-        
-        if self.data_type == 'train':
-            self.data = self.data.iloc[:train_end].copy()
-            self.timestamps = self.timestamps.iloc[:train_end].copy()
-            print(f"[{self.data_type.upper()}] Training set: first {train_end} time points ({self.train_ratio})")
-            print(f"[{self.data_type.upper()}] Training set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        elif self.data_type == 'val':
-            self.data = self.data.iloc[train_end:val_end].copy()
-            self.timestamps = self.timestamps.iloc[train_end:val_end].copy()
-            print(f"[{self.data_type.upper()}] Validation set: time points {train_end+1} to {val_end} ({self.val_ratio})")
-            print(f"[{self.data_type.upper()}] Validation set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        elif self.data_type == 'test':
-            self.data = self.data.iloc[val_end:].copy()
-            self.timestamps = self.timestamps.iloc[val_end:].copy()
-            print(f"[{self.data_type.upper()}] Test set: after time point {val_end+1}")
-            print(f"[{self.data_type.upper()}] Test set time range: {self.timestamps.min()} to {self.timestamps.max()}")
-        
-        print(f"[{self.data_type.upper()}] Data length after split: {len(self.data)} records")
-    
+
+        split_frames = []
+
+        print()
+        print(f"Building {self.data_type.upper()} split")
+
+        for symbol, group in self.raw_df.groupby(
+            'symbol',
+            sort=False
+        ):
+
+            group = (
+                group
+                .sort_values('timestamps')
+                .reset_index(drop=True)
+            )
+
+            total_length = len(group)
+
+            train_end = int(
+                total_length * self.train_ratio
+            )
+
+            val_end = int(
+                total_length *
+                (self.train_ratio + self.val_ratio)
+            )
+
+            if self.data_type == 'train':
+
+                part = group.iloc[
+                    :train_end
+                ].copy()
+
+            elif self.data_type == 'val':
+
+                part = group.iloc[
+                    train_end:val_end
+                ].copy()
+
+            elif self.data_type == 'test':
+
+                part = group.iloc[
+                    val_end:
+                ].copy()
+
+            else:
+                raise ValueError(
+                    f"Unknown data_type: {self.data_type}"
+                )
+
+            if len(part) < self.window:
+                continue
+
+            split_frames.append(part)
+
+            print(
+                f"[{self.data_type.upper()}] "
+                f"{symbol}: {len(part)} rows | "
+                f"{part['timestamps'].min()} -> "
+                f"{part['timestamps'].max()}"
+            )
+
+        if not split_frames:
+            raise ValueError(
+                "No symbol has enough data "
+                "to create training windows"
+            )
+
+        self.data = pd.concat(
+            split_frames,
+            ignore_index=True
+        )
+
+    def _build_sample_index(self):
+
+        self.asset_frames = {}
+        self.sample_index = []
+
+        for symbol, group in self.data.groupby(
+            'symbol',
+            sort=False
+        ):
+
+            group = (
+                group
+                .sort_values('timestamps')
+                .reset_index(drop=True)
+            )
+
+            self.asset_frames[symbol] = group
+
+            max_start = len(group) - self.window
+
+            if max_start < 0:
+                continue
+
+            for start_idx in range(
+                max_start + 1
+            ):
+                self.sample_index.append(
+                    (symbol, start_idx)
+                )
+
+        self.n_samples = len(
+            self.sample_index
+        )
+
+        print(
+            f"[{self.data_type.upper()}] "
+            f"Available samples: {self.n_samples}"
+        )
+
     def set_epoch_seed(self, epoch):
+
         epoch_seed = self.seed + epoch
         self.py_rng.seed(epoch_seed)
         self.current_epoch = epoch
-    
+
     def __len__(self):
+
         return self.n_samples
-    
+
     def __getitem__(self, idx):
-        max_start = len(self.data) - self.window
-        if max_start <= 0:
-            raise ValueError("Data length insufficient to create samples")
-        
+
+        if self.n_samples == 0:
+            raise ValueError(
+                "Dataset contains no valid samples"
+            )
+
         if self.data_type == 'train':
-            epoch = getattr(self, 'current_epoch', 0)
-            start_idx = (idx * 9973 + (epoch + 1) * 104729) % (max_start + 1)
+
+            epoch = getattr(
+                self,
+                'current_epoch',
+                0
+            )
+
+            mapped_idx = (
+                idx * 9973
+                + (epoch + 1) * 104729
+            ) % self.n_samples
+
         else:
-            start_idx = idx % (max_start + 1)
-        
-        end_idx = start_idx + self.window
-        
-        window_data = self.data.iloc[start_idx:end_idx]
-        
-        x = window_data[self.feature_list].values.astype(np.float32)
-        x_stamp = window_data[self.time_feature_list].values.astype(np.float32)
-        
-        x_mean, x_std = np.mean(x, axis=0), np.std(x, axis=0)
-        x = (x - x_mean) / (x_std + 1e-5)
-        x = np.clip(x, -self.clip, self.clip)
-        
-        x_tensor = torch.from_numpy(x)
-        x_stamp_tensor = torch.from_numpy(x_stamp)
-        
-        return x_tensor, x_stamp_tensor
 
+            mapped_idx = (
+                idx % self.n_samples
+            )
 
+        symbol, start_idx = (
+            self.sample_index[mapped_idx]
+        )
+
+        group = self.asset_frames[
+            symbol
+        ]
+
+        end_idx = (
+            start_idx + self.window
+        )
+
+        window_data = group.iloc[
+            start_idx:end_idx
+        ]
+
+        x = window_data[
+            self.feature_list
+        ].values.astype(
+            np.float32
+        )
+
+        x_stamp = window_data[
+            self.time_feature_list
+        ].values.astype(
+            np.float32
+        )
+
+        x_mean = np.mean(
+            x,
+            axis=0
+        )
+
+        x_std = np.std(
+            x,
+            axis=0
+        )
+
+        x = (
+            x - x_mean
+        ) / (
+            x_std + 1e-5
+        )
+
+        x = np.clip(
+            x,
+            -self.clip,
+            self.clip
+        )
+
+        x_tensor = torch.from_numpy(
+            x
+        )
+
+        x_stamp_tensor = torch.from_numpy(
+            x_stamp
+        )
+
+        return (
+            x_tensor,
+            x_stamp_tensor
+        )
 
 
 def setup_logging(exp_name: str, log_dir: str, rank: int = 0) -> logging.Logger:
